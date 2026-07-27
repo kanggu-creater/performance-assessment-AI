@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>백워드 설계를 통한 수행평가 생성기</title>
+  <meta name="theme-color" content="#175C3C"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.7.0/firebase-storage-compat.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css"/>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:"Pretendard",system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;background:#F5F5F0;color:#1B2620;}
+    textarea,input,select,button{font-family:inherit;}
+    @keyframes spin{to{transform:rotate(360deg);}}
+    .spin{width:15px;height:15px;border:2.5px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;display:inline-block;vertical-align:middle;}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+/* ── Firebase (기존 ASSESS AI 프로젝트 재사용 · config는 비밀 아님) ── */
+const firebaseConfig = {
+  apiKey: "AIzaSyCEfanJFvovY499hYXKaxkJnI2WZqG6ydU",
+  authDomain: "assess-ai-77355.firebaseapp.com",
+  databaseURL: "https://assess-ai-77355-default-rtdb.firebaseio.com",
+  projectId: "assess-ai-77355",
+  storageBucket: "assess-ai-77355.firebasestorage.app",
+  messagingSenderId: "36791489485",
+  appId: "1:36791489485:web:937b4ed1dd67af92b4aa84"
+};
+function safeInitFirebase(){
+  if(typeof firebase==="undefined"||!firebase.initializeApp)return false;
+  try{firebase.initializeApp(firebaseConfig);return true;}
+  catch(e){if(e.message&&e.message.includes("already exists"))return true;console.error("[Firebase]",e);return false;}
+}
+if(!safeInitFirebase()){let n=0;const iv=setInterval(()=>{if(safeInitFirebase()||n>30)clearInterval(iv);n++;},200);}
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const GR="#175C3C", GRD="#0F4029", GB="#2E9E63", INK="#1B2620", MUT="#5E6B62",
+      PAR="#FBF3D3", PARL="#E7D89B", SAGE="#E9F0EA", SAGEL="#D4E1D6", LINE="#DBE0DA", PAPER="#F5F5F0";
+const btn=(bg,col="white",ex={})=>({padding:"11px 20px",background:bg,color:col,border:"none",borderRadius:9,cursor:"pointer",fontWeight:700,fontSize:14,...ex});
+const inp={padding:"10px 12px",border:"1px solid "+LINE,borderRadius:8,fontSize:14,width:"100%",outline:"none",fontFamily:"inherit",background:"#fff"};
+const lab={fontSize:13,fontWeight:700,color:"#475569",display:"block",marginBottom:5};
+const card={background:"#fff",borderRadius:14,padding:22,boxShadow:"0 1px 4px rgba(16,52,34,.08)",marginBottom:18};
+const shortCode=id=>id?id.slice(-6).toUpperCase():"";
+const FB="https://assess-ai-77355-default-rtdb.firebaseio.com";
+const now=()=>new Date().toISOString();
+const fmtTime=t=>{try{return new Date(t).toLocaleString("ko-KR",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"});}catch{return"";}};
+
+/* ── Gemini ── */
+const CFG={get key(){return localStorage.getItem("bwd_key")||"";},set key(v){localStorage.setItem("bwd_key",v);}};
+async function loadGeminiKey(){try{const r=await fetch(FB+"/config/geminiKey.json");const d=await r.json();if(d&&typeof d==="string"){CFG.key=d;return true;}}catch{}return false;}
+async function gemini(parts,sys,maxTokens=4096){
+  if(!CFG.key)throw new Error("Gemini 키가 설정되지 않았습니다.");
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${CFG.key}`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents:[{role:"user",parts}],generationConfig:{maxOutputTokens:maxTokens,temperature:0.4,thinkingConfig:{thinkingBudget:0}}})
+  });
+  const d=await res.json();
+  if(d.error)throw new Error(d.error.message);
+  if(!d.candidates||!d.candidates[0])throw new Error("응답이 비어 있습니다.");
+  return (d.candidates[0].content.parts||[]).filter(p=>p.text).map(p=>p.text).join("");
+}
+async function geminiJSON(parts,sys,mt=4096){return extractJson(await gemini(parts,sys,mt));}
+function extractJson(text){
+  let t=(text||"").trim().replace(/```json/gi,"").replace(/```/g,"").trim();
+  const s=t.indexOf("{");if(s>0)t=t.slice(s);
+  const tp=str=>{try{return JSON.parse(str);}catch(e){return undefined;}};
+  let o=tp(t);if(o)return o;
+  const stackAt=str=>{const st=[];let q=false,e=false;for(const ch of str){if(q){if(e)e=false;else if(ch==="\\")e=true;else if(ch==='"')q=false;continue;}if(ch==='"'){q=true;continue;}if(ch==="{")st.push("}");else if(ch==="[")st.push("]");else if(ch==="}"||ch==="]")st.pop();}return st;};
+  let q=false,e=false,depth=0,cut=-1;
+  for(let i=0;i<t.length;i++){const ch=t[i];if(q){if(e)e=false;else if(ch==="\\")e=true;else if(ch==='"')q=false;continue;}if(ch==='"'){q=true;continue;}if(ch==="{"||ch==="[")depth++;else if(ch==="}"||ch==="]"){depth--;if(depth>=1)cut=i;}}
+  if(cut>0){let h=t.slice(0,cut+1).replace(/,\s*$/,"");const st=stackAt(h);for(let i=st.length-1;i>=0;i--)h+=st[i];o=tp(h);if(o)return o;}
+  throw new Error("AI 응답을 해석하지 못했습니다. 다시 시도해 주세요.");
+}
+const LEVELS={3:[["우수",3],["보통",2],["미흡",1]],4:[["매우 우수",4],["우수",3],["보통",2],["미흡",1]],5:[["매우 우수",5],["우수",4],["보통",3],["미흡",2],["매우 미흡",1]]};
+const clamp=(v,len)=>{v=parseInt(v);if(isNaN(v)||v<0)return 0;if(v>=len)return len-1;return v;};
+function scoreFromLevels(rubric,pick){let total=0,wsum=0;rubric.forEach((c,ci)=>{const w=+c.weight||0;wsum+=w;if(pick[ci]!=null){const maxP=Math.max(...c.levels.map(l=>l.points));total+=w*(c.levels[pick[ci]].points/maxP);}});return {score:Math.round(total),wsum,pct:wsum?Math.round(total/wsum*100):0};}
+
+/* ── 파일 ── */
+function fileB64(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(",")[1]);r.onerror=()=>rej(new Error("read fail"));r.readAsDataURL(file);});}
+function filePart(file,b64){const isPdf=file.type==="application/pdf"||/\.pdf$/i.test(file.name);return {inline_data:{mime_type:isPdf?"application/pdf":(file.type||"image/png"),data:b64}};}
+async function uploadToStorage(path,file){const ref=firebase.storage().ref().child(path);await ref.put(file);return await ref.getDownloadURL();}
+
+/* ── AI 작업 ── */
+async function aiDraft(standard,grade){
+  const sys="당신은 백워드 설계(UbD)와 GRASPS 수행평가 전문가입니다. 오직 JSON만 출력.";
+  const txt=`성취기준으로 1단계 목표와 GRASPS 초안을 설계하세요.
+[성취기준] ${standard}${grade?"\n[학년] "+grade:""}
+- goal: "학생은 …할 수 있다." big: 핵심개념 2~3개. understanding: 통찰 한 문장. essential_question: 핵심 질문 하나.
+- grasps: g(과제목표),r(역할),a(대상),s(상황),p(산출물),st(성공기준 2~3).
+JSON: {"goal":"","big":"","understanding":"","essential_question":"","grasps":{"g":"","r":"","a":"","s":"","p":"","st":""}}`;
+  return geminiJSON([{text:txt}],sys);
+}
+async function aiRubric(d,numLevels){
+  const p=LEVELS[numLevels],labels=p.map(x=>x[0]).join(", "),pts=p.map(x=>x[1]).join(", ");
+  const sys="당신은 GRASPS 루브릭 전문가입니다. 오직 JSON만 출력.";
+  const txt=`아래 목표·수행과제 채점용 분석적 루브릭을 설계하세요.
+[목표] ${d.goal||"-"} / 빅 ${d.big||"-"} / 이해 ${d.understanding||"-"}
+[GRASPS] G:${d.grasps.g} R:${d.grasps.r} A:${d.grasps.a} S:${d.grasps.s} P:${d.grasps.p} St:${d.grasps.st}
+- 준거 4개:(1)내용·개념 이해 (2)산출물 완성도 (3)역할·대상·상황 적합성 (4)형식·언어 정확성. 이름 구체적으로.
+- 정수 weight, 합=100. 각 준거 ${numLevels}수준(라벨/points: ${labels} / ${pts}). descriptor 관찰가능·한문장·45자.
+JSON: {"criteria":[{"name":"","weight":25,"levels":[${p.map(x=>`{"label":"${x[0]}","points":${x[1]},"descriptor":""}`).join(",")}]}]}`;
+  const o=await geminiJSON([{text:txt}],sys);
+  o.criteria=(o.criteria||[]).filter(c=>c&&c.name&&Array.isArray(c.levels)&&c.levels.length);
+  if(!o.criteria.length)throw new Error("루브릭을 해석하지 못했습니다.");
+  return o.criteria;
+}
+async function aiSheet(d){
+  const crit=(d.rubric||[]).map(c=>c.name).join(", ");
+  const sys="당신은 GRASPS 수행평가 전문가입니다. 오직 JSON만 출력.";
+  const txt=`목표·수행과제·루브릭에 맞춰 학생 배부용 과제지를 작성하세요.
+[목표] ${d.goal} [GRASPS] G:${d.grasps.g} R:${d.grasps.r} A:${d.grasps.a} S:${d.grasps.s} P:${d.grasps.p} St:${d.grasps.st} [준거] ${crit}
+- title, scenario(2인칭 3~5문장), steps(4~6), deliverables(2~4), criteria_for_students(준거 수만큼), teacher_notes(2~3문장).
+JSON: {"title":"","scenario":"","steps":[],"deliverables":[],"criteria_for_students":[],"teacher_notes":""}`;
+  const o=await geminiJSON([{text:txt}],sys);
+  o.steps=o.steps||[];o.deliverables=o.deliverables||[];o.criteria_for_students=o.criteria_for_students||[];
+  return o;
+}
+async function aiFeedback(d,draftText,parts,history){
+  const rub=(d.rubric||[]).map((c,i)=>`준거 ${i}. ${c.name}\n`+c.levels.map((l,j)=>`  [${j}] ${l.label}: ${l.descriptor}`).join("\n")).join("\n");
+  const prev=history&&history.length?`\n[이전 피드백 요약] ${history[history.length-1].summary}`:"";
+  const sys="당신은 다정한 선생님입니다. 점수 대신 형성적 피드백을 주세요. 오직 JSON만 출력.";
+  const txt=`학생 초안을 루브릭 기준으로 살펴보고 더 좋아질 방법을 알려주세요.
+[목표] ${d.goal||d.grasps.g}
+[루브릭]
+${rub}
+${draftText?"[초안]\n"+draftText:"[초안] 첨부 파일 참고"}${prev}
+- 친근한 반말체, 격려 위주. 각 준거: level_index(0=최상위), strength(1문장), improve(1~2문장).
+- encouragement 2~3문장. next_steps 3~4개. ${history&&history.length?"progress_note: 이전보다 좋아진 점 1~2문장.":"progress_note는 빈 문자열."} 사진 불명확 시 추측 말고 알리기.
+JSON: {"encouragement":"","progress_note":"","criteria":[{"criterion_index":0,"level_index":1,"strength":"","improve":""}],"next_steps":[]}`;
+  const o=await geminiJSON([...(parts||[]),{text:txt}],sys);
+  if(!Array.isArray(o.criteria))throw new Error("피드백을 해석하지 못했어요.");
+  return o;
+}
+async function aiGrade(d,draftText,parts){
+  const rub=(d.rubric||[]).map((c,i)=>`준거 ${i}. ${c.name}(${c.weight}점)\n`+c.levels.map((l,j)=>`  [${j}] ${l.label}(${l.points}점): ${l.descriptor}`).join("\n")).join("\n");
+  const sys="당신은 이 수행평가를 채점하는 교사입니다. 오직 JSON만 출력.";
+  const txt=`학생 최종 제출물을 루브릭으로 채점하세요.
+[루브릭]
+${rub}
+${draftText?"[제출물]\n"+draftText:"[제출물] 첨부 파일 참고"}
+- 각 준거 level_index(0=최상위)와 근거 있는 피드백 1문장. overall 3문장, strengths 2~3, improvements 2~3.
+- 제출물이 불명확하면 추측 말고 그 사실을 반영.
+JSON: {"scores":[{"criterion_index":0,"level_index":1,"feedback":""}],"overall":"","strengths":[],"improvements":[]}`;
+  const o=await geminiJSON([...(parts||[]),{text:txt}],sys);
+  if(!Array.isArray(o.scores))throw new Error("채점 결과를 해석하지 못했습니다.");
+  return o;
+}
+
+/* ── DB ── */
+const DB={
+  async listAsm(uid){try{const r=await fetch(`${FB}/bwd/assessments/${uid}.json`);const d=await r.json();if(!d)return[];return Object.values(d).sort((a,b)=>new Date(b.createdAt)-new Date(a.createdAt));}catch{return[];}},
+  async setAsm(uid,arr){const o={};arr.forEach(a=>o[a.id]=a);await fetch(`${FB}/bwd/assessments/${uid}.json`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(o)});},
+  async findAsm(id){try{const r=await fetch(`${FB}/bwd/assessments.json`);const d=await r.json();if(!d)return null;for(const uid of Object.keys(d))if(d[uid][id])return {...d[uid][id],_ownerUid:uid};return null;}catch{return null;}},
+  async findByCode(code){try{const r=await fetch(`${FB}/bwd/assessments.json`);const d=await r.json();if(!d)return null;for(const uid of Object.keys(d))for(const id of Object.keys(d[uid]))if(shortCode(id)===code.toUpperCase())return {...d[uid][id],_ownerUid:uid};return null;}catch{return null;}},
+  async getResults(uid,id){try{const r=await fetch(`${FB}/bwd/results/${uid}/${id}.json`);const d=await r.json();if(!d)return[];return Object.values(d);}catch{return[];}},
+  async setResult(uid,id,data){const key=data.studentId.replace(/[.#$/[\]\s]/g,"_");const res=await fetch(`${FB}/bwd/results/${uid}/${id}/${key}.json`,{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});if(!res.ok)throw new Error("저장 실패: "+res.status);return res.json();}
+};
+
+/* ── 공통 UI ── */
+function Center({children}){return <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:PAPER,padding:16}}>{children}</div>;}
+function Empty({icon,text}){return <div style={{textAlign:"center",padding:52,color:"#94A3B8"}}><div style={{fontSize:34,marginBottom:10}}>{icon}</div><div style={{fontSize:14}}>{text}</div></div>;}
+function Err({msg}){return msg?<div style={{background:"#FCEEEC",border:"1px solid #E6C3BD",color:"#8F3B33",borderRadius:9,padding:"11px 14px",fontSize:13,marginTop:10}}>{msg}</div>:null;}
+function Loading({label}){return <span><span className="spin" style={{marginRight:8}}></span>{label}</span>;}
+function QRImage({url}){const ref=useRef(null);useEffect(()=>{if(!url||!ref.current)return;ref.current.innerHTML="";const gen=()=>new window.QRCode(ref.current,{text:url,width:200,height:200,correctLevel:window.QRCode.CorrectLevel.M});window.QRCode?gen():(()=>{const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js";s.onload=gen;document.head.appendChild(s);})();},[url]);return <div ref={ref} style={{lineHeight:0}}/>;}
+
+/* ══════════ ROOT ══════════ */
+function App(){
+  const [mode,setMode]=useState("loading"),[sAsm,setSAsm]=useState(null),[user,setUser]=useState(null);
+  useEffect(()=>{(async()=>{
+    await loadGeminiKey();
+    const q=new URLSearchParams(location.search);const id=q.get("id"),code=q.get("code");
+    if(id){const a=await DB.findAsm(id);if(a){setSAsm(a);setMode("student");return;}}
+    if(code){const a=await DB.findByCode(code);if(a){setSAsm(a);setMode("student");return;}}
+    let w=0;while((typeof firebase==="undefined"||!firebase.auth)&&w<8000){await new Promise(r=>setTimeout(r,100));w+=100;}
+    if(typeof firebase!=="undefined"&&firebase.auth){firebase.auth().onAuthStateChanged(u=>{if(u&&u.isAnonymous)return;setUser(u);setMode(u?"teacher":"login");});}
+    else setMode("login");
+  })();},[]);
+  if(mode==="loading")return <Center><div style={{color:"#94A3B8"}}>로딩 중…</div></Center>;
+  if(mode==="student")return <StudentPage asm={sAsm}/>;
+  if(mode==="login")return <LoginPage/>;
+  return <TeacherApp user={user}/>;
+}
+
+/* ══════════ 로그인 ══════════ */
+function LoginPage(){
+  const [view,setView]=useState("main"),[code,setCode]=useState(""),[err,setErr]=useState(""),[busy,setBusy]=useState(false);
+  const login=async()=>{let w=0;while((typeof firebase==="undefined"||!firebase.auth)&&w<5000){await new Promise(r=>setTimeout(r,200));w+=200;}if(typeof firebase==="undefined"||!firebase.auth){alert("로그인 연결 실패. 새로고침(F5) 또는 광고차단 해제 후 시도하세요.");return;}try{await firebase.auth().signInWithPopup(new firebase.auth.GoogleAuthProvider());}catch(e){alert("로그인 오류: "+e.message);}};
+  const enter=async()=>{const c=code.replace("#","").trim().toUpperCase();if(c.length!==6){setErr("입장 코드는 6자리입니다.");return;}setBusy(true);setErr("");const a=await DB.findByCode(c);if(!a){setErr("존재하지 않는 코드입니다.");setBusy(false);return;}location.search=`?code=${c}`;};
+  if(view==="student")return(
+    <Center><div style={{background:"#fff",borderRadius:20,padding:36,width:380,boxShadow:"0 16px 48px rgba(16,52,34,.12)",textAlign:"center"}}>
+      <div style={{fontSize:44,marginBottom:10}}>🎓</div><h1 style={{fontSize:21,fontWeight:900,color:GR,marginBottom:8}}>학생 입장</h1>
+      <p style={{color:MUT,fontSize:13,marginBottom:22}}>선생님이 준 6자리 입장 코드를 입력하세요</p>
+      <input value={code} onChange={e=>{setCode(e.target.value.toUpperCase());setErr("");}} onKeyDown={e=>e.key==="Enter"&&!busy&&enter()} placeholder="A3F2B1" maxLength={6} autoFocus disabled={busy} style={{...inp,fontSize:26,textAlign:"center",fontWeight:900,letterSpacing:6,padding:16,borderColor:err?"#FCA5A5":LINE}}/>
+      <Err msg={err}/>
+      <button onClick={enter} disabled={busy} style={btn(busy?"#94A3B8":GR,"#fff",{width:"100%",padding:14,marginTop:12})}>{busy?"확인 중…":"입장하기"}</button>
+      <button onClick={()=>{setView("main");setCode("");setErr("");}} style={{width:"100%",padding:11,background:"none",border:"none",color:MUT,fontSize:13,cursor:"pointer",marginTop:4,fontWeight:600}}>← 뒤로</button>
+    </div></Center>
+  );
+  return(
+    <Center><div style={{background:"#fff",borderRadius:20,padding:38,width:400,boxShadow:"0 16px 48px rgba(16,52,34,.12)",textAlign:"center"}}>
+      <div style={{fontSize:42,marginBottom:10}}>🎯</div>
+      <h1 style={{fontSize:22,fontWeight:900,color:GR,marginBottom:6,lineHeight:1.3}}>백워드 설계<br/>수행평가 생성기</h1>
+      <p style={{color:MUT,fontSize:13,marginBottom:26}}>성취기준 → 목표·수행과제 → 루브릭 → 평가 → 피드백</p>
+      <button onClick={login} style={{width:"100%",padding:14,background:"#fff",border:"1px solid "+LINE,borderRadius:10,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:12,fontSize:15,fontWeight:600,color:"#334155",marginBottom:10}}>
+        <svg width="19" height="19" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        교사 — Google 로그인
+      </button>
+      <button onClick={()=>setView("student")} style={btn(GR,"#fff",{width:"100%",padding:14,display:"flex",alignItems:"center",justifyContent:"center",gap:10,fontSize:15})}><span style={{fontSize:17}}>🎓</span> 학생 — 입장 코드로 참여</button>
+    </div></Center>
+  );
+}
+
+/* ══════════ 교사 앱 (탭 3개) ══════════ */
+function TeacherApp({user}){
+  const [tab,setTab]=useState("design");
+  const [asms,setAsms]=useState([]),[ready,setReady]=useState(false),[menu,setMenu]=useState(false);
+  useEffect(()=>{DB.listAsm(user.uid).then(a=>{setAsms(a);setReady(true);});},[user.uid]);
+  const save=async next=>{await DB.setAsm(user.uid,next);setAsms(next);};
+  const logout=async()=>{await firebase.auth().signOut();location.reload();};
+  const TABS=[["design","✏️ 설계"],["library","📚 내 과제·공유"],["results","📊 학생 과정·결과"]];
+  return(
+    <div style={{minHeight:"100vh",background:PAPER}}>
+      <header style={{background:GR,color:"#fff",padding:"0 18px",display:"flex",alignItems:"center",justifyContent:"space-between",height:54}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><span style={{fontSize:16,fontWeight:900}}>백워드 설계 · 수행평가</span><span style={{height:15,width:1,background:"rgba(255,255,255,.3)"}}/><span style={{fontSize:12,opacity:.75}}>교사</span></div>
+        <div style={{position:"relative"}}>
+          <button onClick={()=>setMenu(!menu)} style={{display:"flex",alignItems:"center",gap:8,background:"rgba(255,255,255,.15)",border:"none",borderRadius:20,padding:"4px 12px 4px 4px",cursor:"pointer",color:"#fff"}}>{user.photoURL?<img src={user.photoURL} alt="" style={{width:26,height:26,borderRadius:"50%"}}/>:<div style={{width:26,height:26,borderRadius:"50%",background:"rgba(255,255,255,.3)",display:"flex",alignItems:"center",justifyContent:"center"}}>👤</div>}<span style={{fontSize:12,fontWeight:600}}>{user.displayName||"선생님"}</span></button>
+          {menu&&<div style={{position:"absolute",top:"110%",right:0,background:"#fff",borderRadius:10,boxShadow:"0 8px 24px rgba(0,0,0,.15)",minWidth:200,zIndex:100,overflow:"hidden"}}><div style={{padding:"12px 14px",borderBottom:"1px solid "+LINE}}><div style={{fontSize:13,fontWeight:700,color:INK}}>{user.displayName}</div><div style={{fontSize:11,color:MUT,marginTop:2}}>{user.email}</div></div><button onClick={logout} style={{width:"100%",padding:"11px 14px",border:"none",background:"none",cursor:"pointer",textAlign:"left",fontSize:13,color:"#DC2626",fontWeight:600}}>🚪 로그아웃</button></div>}
+        </div>
+      </header>
+      <div style={{background:"#fff",borderBottom:"1px solid "+LINE,display:"flex",paddingLeft:10,overflowX:"auto"}}>
+        {TABS.map(([id,l])=><button key={id} onClick={()=>setTab(id)} style={{padding:"12px 16px",border:"none",background:"none",cursor:"pointer",fontWeight:tab===id?700:500,fontSize:13,color:tab===id?GR:MUT,borderBottom:tab===id?"2px solid "+GR:"2px solid transparent",whiteSpace:"nowrap"}}>{l}</button>)}
+      </div>
+      <main style={{maxWidth:980,margin:"0 auto",padding:"22px 18px 60px"}}>
+        {!ready?<Empty icon="⏳" text="로딩 중…"/>:<>
+          {tab==="design"&&<DesignTab asms={asms} onSave={save} onDone={()=>setTab("library")}/>}
+          {tab==="library"&&<LibraryTab asms={asms} onSave={save}/>}
+          {tab==="results"&&<ResultsTab asms={asms} uid={user.uid}/>}
+        </>}
+      </main>
+    </div>
+  );
+}
+
+/* ── 설계 탭 ── */
+function DesignTab({asms,onSave,onDone}){
+  const blank={title:"",subject:"",grade:"",cls:"",standard:"",goal:"",big:"",understanding:"",essential_question:"",grasps:{g:"",r:"",a:"",s:"",p:"",st:""},rubric:[],sheet:null,numLevels:4};
+  const [f,setF]=useState(blank),[busy,setBusy]=useState(""),[err,setErr]=useState("");
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));const setG=(k,v)=>setF(p=>({...p,grasps:{...p.grasps,[k]:v}}));
+  const gd=async()=>{if(!f.standard.trim()){setErr("성취기준을 입력하세요.");return;}setErr("");setBusy("draft");try{const d=await aiDraft(f.standard,f.grade);setF(p=>({...p,goal:d.goal||"",big:d.big||"",understanding:d.understanding||"",essential_question:d.essential_question||"",grasps:{g:d.grasps.g||"",r:d.grasps.r||"",a:d.grasps.a||"",s:d.grasps.s||"",p:d.grasps.p||"",st:d.grasps.st||""}}));}catch(e){setErr(e.message);}setBusy("");};
+  const gr=async()=>{setErr("");setBusy("rubric");try{const c=await aiRubric(f,f.numLevels);setF(p=>({...p,rubric:c}));}catch(e){setErr(e.message);}setBusy("");};
+  const gs=async()=>{if(!f.rubric.length){setErr("먼저 루브릭을 생성하세요.");return;}setErr("");setBusy("sheet");try{const s=await aiSheet(f);setF(p=>({...p,sheet:s}));}catch(e){setErr(e.message);}setBusy("");};
+  const save=async()=>{if(!f.title.trim()){setErr("평가 제목을 입력하세요.");return;}if(!f.rubric.length){setErr("루브릭을 먼저 생성하세요.");return;}await onSave([{...f,id:Date.now().toString(),createdAt:now()},...asms]);onDone();};
+  return(
+    <div>
+      <div style={card}>
+        <h2 style={{fontSize:16,fontWeight:800,marginBottom:14}}>① 성취기준으로 시작</h2>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <div><label style={lab}>평가 제목 *</label><input style={inp} placeholder="예: 3학년 국어 – 설득하는 글쓰기" value={f.title} onChange={e=>set("title",e.target.value)}/></div>
+          <div><label style={lab}>수업 주제</label><input style={inp} placeholder="예: 논증과 근거" value={f.subject} onChange={e=>set("subject",e.target.value)}/></div>
+          <div><label style={lab}>학년</label><input style={inp} placeholder="예: 3" value={f.grade} onChange={e=>set("grade",e.target.value)}/></div>
+          <div><label style={lab}>반</label><input style={inp} placeholder="예: 2" value={f.cls} onChange={e=>set("cls",e.target.value)}/></div>
+        </div>
+        <label style={lab}>성취기준</label>
+        <textarea style={{...inp,height:60,resize:"vertical"}} placeholder="예) [9국03-05] 자신의 삶과 경험을 바탕으로 독자에게 공감을 얻는 글을 쓴다." value={f.standard} onChange={e=>set("standard",e.target.value)}/>
+        <button onClick={gd} disabled={busy} style={btn(GR,"#fff",{marginTop:12})}>{busy==="draft"?<Loading label="초안 생성 중…"/>:"목표·수행과제 초안 생성 (AI)"}</button>
+      </div>
+      <div style={card}>
+        <h2 style={{fontSize:16,fontWeight:800,marginBottom:6}}>② 1단계 목표 <span style={{fontWeight:400,fontSize:12,color:MUT}}>— 수정 가능</span></h2>
+        <div style={{background:PAR,border:"1.5px solid "+PARL,borderRadius:12,padding:12,display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+          <div style={{gridColumn:"1 / -1"}}><label style={lab}>목표 설정</label><textarea style={{...inp,height:46,resize:"vertical"}} value={f.goal} onChange={e=>set("goal",e.target.value)}/></div>
+          <div><label style={lab}>빅 아이디어</label><textarea style={{...inp,height:46,resize:"vertical"}} value={f.big} onChange={e=>set("big",e.target.value)}/></div>
+          <div><label style={lab}>영속적 이해</label><textarea style={{...inp,height:46,resize:"vertical"}} value={f.understanding} onChange={e=>set("understanding",e.target.value)}/></div>
+          <div style={{gridColumn:"1 / -1"}}><label style={lab}>탐구 질문</label><textarea style={{...inp,height:38,resize:"vertical"}} value={f.essential_question} onChange={e=>set("essential_question",e.target.value)}/></div>
+        </div>
+        <h2 style={{fontSize:16,fontWeight:800,margin:"18px 0 10px"}}>GRASPS 수행과제</h2>
+        {[["g","G·목표"],["r","R·역할"],["a","A·대상"],["s","S·상황"],["p","P·산출물"],["st","S·기준"]].map(([k,l])=>(
+          <div key={k} style={{display:"grid",gridTemplateColumns:"64px 1fr",gap:10,marginBottom:8,alignItems:"center"}}>
+            <div style={{background:GR,color:"#fff",borderRadius:8,padding:"9px 4px",textAlign:"center",fontSize:12,fontWeight:700}}>{l}</div>
+            <textarea style={{...inp,height:40,resize:"vertical"}} value={f.grasps[k]} onChange={e=>setG(k,e.target.value)}/>
+          </div>
+        ))}
+      </div>
+      <div style={card}>
+        <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap",marginBottom:12}}>
+          <h2 style={{fontSize:16,fontWeight:800}}>③ 분석적 루브릭</h2>
+          <select value={f.numLevels} onChange={e=>set("numLevels",+e.target.value)} style={{...inp,width:104}}><option value={3}>3단계</option><option value={4}>4단계</option><option value={5}>5단계</option></select>
+          <button onClick={gr} disabled={busy} style={btn(GR,"#fff",{fontSize:13,padding:"9px 16px"})}>{busy==="rubric"?<Loading label="생성 중…"/>:"루브릭 생성 (AI)"}</button>
+        </div>
+        {f.rubric.length>0?<RubricEditor rubric={f.rubric} onChange={r=>set("rubric",r)}/>:<div style={{color:"#94A3B8",fontSize:13}}>목표·GRASPS를 채운 뒤 생성하세요.</div>}
+      </div>
+      <div style={card}>
+        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12,flexWrap:"wrap"}}><h2 style={{fontSize:16,fontWeight:800}}>④ 평가 과제지 <span style={{fontWeight:400,fontSize:12,color:MUT}}>(학생 배부용)</span></h2><button onClick={gs} disabled={busy} style={btn(GR,"#fff",{fontSize:13,padding:"9px 16px"})}>{busy==="sheet"?<Loading label="생성 중…"/>:"과제지 생성 (AI)"}</button></div>
+        {f.sheet?<SheetView sheet={f.sheet} onChange={s=>set("sheet",s)}/>:<div style={{color:"#94A3B8",fontSize:13}}>루브릭 생성 후 만들 수 있습니다.</div>}
+      </div>
+      <Err msg={err}/>
+      <div style={{display:"flex",justifyContent:"flex-end",marginTop:14}}><button onClick={save} style={btn(GB,"#fff",{padding:"13px 28px",fontSize:15})}>💾 저장 → 학생에게 공유</button></div>
+    </div>
+  );
+}
+function RubricEditor({rubric,onChange}){
+  const upd=(ci,fn)=>onChange(rubric.map((c,i)=>i===ci?fn({...c}):c));
+  return(
+    <div style={{overflowX:"auto"}}><table style={{borderCollapse:"collapse",width:"100%",minWidth:640,fontSize:13}}>
+      <thead><tr><th style={{background:GR,color:"#fff",padding:"10px 12px",textAlign:"left"}}>준거 · 배점</th>{rubric[0].levels.map((l,j)=><th key={j} style={{background:GR,color:"#fff",padding:"10px 12px",textAlign:"left"}}>{l.label}<div style={{fontSize:10,color:"#BFE3CD"}}>{l.points}점</div></th>)}</tr></thead>
+      <tbody>{rubric.map((c,ci)=>(
+        <tr key={ci} style={{borderBottom:"1px solid "+LINE}}>
+          <td style={{background:SAGE,padding:"10px 12px",verticalAlign:"top",width:170}}>
+            <textarea value={c.name} onChange={e=>upd(ci,x=>({...x,name:e.target.value}))} style={{border:"none",background:"transparent",width:"100%",fontWeight:800,color:GRD,fontSize:13,resize:"none",outline:"none",fontFamily:"inherit"}}/>
+            <div style={{marginTop:6,display:"flex",alignItems:"center",gap:5}}><input type="number" value={c.weight} onChange={e=>upd(ci,x=>({...x,weight:+e.target.value||0}))} style={{width:52,padding:"4px 6px",border:"1px solid "+SAGEL,borderRadius:6,textAlign:"center",fontSize:13}}/><span style={{fontSize:11,color:MUT}}>점</span></div>
+          </td>
+          {c.levels.map((l,li)=>(<td key={li} style={{padding:"8px 10px",verticalAlign:"top",borderLeft:"1px solid "+LINE}}><textarea value={l.descriptor} onChange={e=>upd(ci,x=>{const lv=x.levels.map((y,k)=>k===li?{...y,descriptor:e.target.value}:y);return {...x,levels:lv};})} style={{border:"1px solid "+LINE,borderRadius:6,width:"100%",fontSize:12.5,resize:"vertical",minHeight:52,padding:6,outline:"none",fontFamily:"inherit",lineHeight:1.5}}/></td>))}
+        </tr>
+      ))}</tbody>
+    </table></div>
+  );
+}
+function SheetView({sheet,onChange}){
+  const set=(k,v)=>onChange({...sheet,[k]:v});
+  const list=k=>(sheet[k]||[]).map((x,i)=>(<li key={i} style={{marginBottom:5}}><input value={x} onChange={e=>{const a=[...sheet[k]];a[i]=e.target.value;set(k,a);}} style={{...inp,fontSize:13}}/></li>));
+  return(
+    <div style={{maxWidth:720}}>
+      <input value={sheet.title} onChange={e=>set("title",e.target.value)} style={{...inp,fontSize:18,fontWeight:800,marginBottom:10}}/>
+      <label style={lab}>과제 상황</label><textarea value={sheet.scenario} onChange={e=>set("scenario",e.target.value)} style={{...inp,height:76,background:PAR,border:"1.5px solid "+PARL,resize:"vertical",marginBottom:12}}/>
+      <label style={lab}>수행 절차</label><ol style={{paddingLeft:18,marginBottom:12}}>{list("steps")}</ol>
+      <label style={lab}>제출물 요건</label><ul style={{paddingLeft:18,marginBottom:12}}>{list("deliverables")}</ul>
+      <label style={lab}>평가 기준(학생용)</label><ul style={{paddingLeft:18,marginBottom:12}}>{list("criteria_for_students")}</ul>
+      <label style={lab}>교사용 메모</label><textarea value={sheet.teacher_notes} onChange={e=>set("teacher_notes",e.target.value)} style={{...inp,height:52,resize:"vertical",background:"#F4F6F3"}}/>
+    </div>
+  );
+}
+
+/* ── 내 과제·공유 탭 ── */
+function LibraryTab({asms,onSave}){
+  const [qr,setQr]=useState(null);
+  const del=async id=>{if(!confirm("삭제하시겠습니까?"))return;await onSave(asms.filter(a=>a.id!==id));};
+  const base=location.href.split(/[#?]/)[0];
+  if(!asms.length)return <Empty icon="📚" text="‘설계’ 탭에서 과제를 만들어 저장하세요."/>;
+  return(
+    <div>
+      <h3 style={{fontSize:14,fontWeight:800,marginBottom:10}}>저장된 과제 ({asms.length}개) — 코드/QR로 학생에게 공유</h3>
+      {asms.map(a=>{const url=`${base}?id=${a.id}`;return(
+        <div key={a.id} style={{...card,padding:"16px 18px",marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}>
+            <div style={{flex:1,minWidth:180}}>
+              <div style={{fontWeight:800,fontSize:15,color:INK,marginBottom:3}}>{a.title}</div>
+              <div style={{fontSize:12,color:MUT}}>{a.subject&&`📚 ${a.subject} · `}{a.grade&&`${a.grade}학년 `}{a.cls&&`${a.cls}반 · `}준거 {a.rubric?.length||0}개</div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+              <span style={{fontSize:18,fontWeight:900,color:GR,letterSpacing:2,background:SAGE,padding:"6px 12px",borderRadius:8}}>#{shortCode(a.id)}</span>
+              <button onClick={()=>navigator.clipboard.writeText(url).then(()=>alert("학생용 링크를 복사했습니다:\n"+url))} style={btn("#fff",GR,{border:"1px solid "+SAGEL,fontSize:12,padding:"8px 12px"})}>링크 복사</button>
+              <button onClick={()=>setQr(qr===a.id?null:a.id)} style={btn("#fff",GR,{border:"1px solid "+SAGEL,fontSize:12,padding:"8px 12px"})}>{qr===a.id?"QR 닫기":"QR 보기"}</button>
+              <button onClick={()=>del(a.id)} style={btn("#FEF2F2","#DC2626",{border:"1px solid #FCA5A5",fontSize:12,padding:"8px 12px"})}>삭제</button>
+            </div>
+          </div>
+          {qr===a.id&&<div style={{marginTop:14,display:"flex",justifyContent:"center",padding:14,background:"#fff",border:"1px solid "+LINE,borderRadius:10}}><QRImage url={url}/></div>}
+        </div>
+      );})}
+    </div>
+  );
+}
+
+/* ── 학생 과정·결과 탭 ── */
+function ResultsTab({asms,uid}){
+  const [sel,setSel]=useState(""),[rows,setRows]=useState([]),[open,setOpen]=useState({});
+  useEffect(()=>{if(!sel)return;const load=()=>DB.getResults(uid,sel).then(setRows);load();const iv=setInterval(load,5000);return()=>clearInterval(iv);},[sel,uid]);
+  const asm=asms.find(a=>a.id===sel);
+  const sorted=[...rows].sort((a,b)=>(a.studentId||"").localeCompare(b.studentId||""));
+  const download=()=>{if(!asm)return;const data=sorted.map(r=>({"학번":r.studentId,"제출":r.submitted?"완료":"진행중","시도횟수":(r.rounds||[]).length,"최종점수":r.final?.score??"","최종 총평":r.final?.overall||""}));const ws=XLSX.utils.json_to_sheet(data);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"결과");XLSX.writeFile(wb,`${asm.title}_결과.xlsx`);};
+  return(
+    <div>
+      <div style={{display:"flex",gap:10,marginBottom:16,alignItems:"center",flexWrap:"wrap"}}>
+        <select value={sel} onChange={e=>{setSel(e.target.value);setOpen({});}} style={{...inp,flex:1,minWidth:200}}><option value="">📋 과제를 선택하세요</option>{asms.map(a=><option key={a.id} value={a.id}>{a.title}</option>)}</select>
+        {sel&&<><span style={{fontSize:11,color:"#94A3B8"}}>● 5초마다 갱신</span><button onClick={download} style={btn("#059669","#fff",{fontSize:13,padding:"9px 16px"})}>⬇ 엑셀</button></>}
+      </div>
+      {sel&&!sorted.length&&<Empty icon="⏳" text="아직 참여한 학생이 없습니다."/>}
+      {sorted.map(r=>(
+        <div key={r.studentId} style={{...card,padding:0,overflow:"hidden",marginBottom:12}}>
+          <div onClick={()=>setOpen(o=>({...o,[r.studentId]:!o[r.studentId]}))} style={{padding:"14px 18px",display:"flex",alignItems:"center",justifyContent:"space-between",cursor:"pointer",gap:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <span style={{fontWeight:800,fontSize:15,color:INK}}>{r.studentId}</span>
+              <span style={{fontSize:12,color:MUT}}>시도 {(r.rounds||[]).length}회</span>
+              {r.submitted?<span style={{background:"#DCFCE7",color:"#166534",padding:"2px 10px",borderRadius:20,fontWeight:700,fontSize:12}}>제출 완료</span>:<span style={{background:"#FEF3C7",color:"#92400E",padding:"2px 10px",borderRadius:20,fontWeight:700,fontSize:12}}>진행중</span>}
+              {r.final&&<span style={{fontWeight:800,color:GR}}>{r.final.score}점</span>}
+            </div>
+            <span style={{color:MUT,fontSize:13}}>{open[r.studentId]?"▲ 접기":"▼ 전 과정 보기"}</span>
+          </div>
+          {open[r.studentId]&&<div style={{padding:"0 18px 18px",borderTop:"1px solid "+LINE}}>
+            {(r.rounds||[]).map((rd,i)=>(
+              <div key={i} style={{marginTop:16}}>
+                <div style={{fontWeight:800,fontSize:13,color:GR,marginBottom:6}}>📝 {rd.n}차 시도 · {fmtTime(rd.time)}</div>
+                <MaterialView r={rd}/>
+                {rd.feedback&&<div style={{background:SAGE,borderRadius:10,padding:"12px 14px",marginTop:8}}>
+                  <div style={{fontSize:13,fontWeight:700,color:GRD,marginBottom:6}}>💬 받은 피드백</div>
+                  <div style={{fontSize:13,color:INK,lineHeight:1.6,marginBottom:6}}>{rd.feedback.encouragement}</div>
+                  {(rd.feedback.criteria||[]).map((c,j)=>{const ci=clamp(c.criterion_index,asm.rubric.length);return <div key={j} style={{fontSize:12.5,color:MUT,lineHeight:1.55,marginBottom:3}}><b style={{color:INK}}>{asm.rubric[ci].name}</b> — 👍 {c.strength} / ✏️ {c.improve}</div>;})}
+                </div>}
+              </div>
+            ))}
+            {r.final&&<div style={{marginTop:18,border:"2px solid "+GR,borderRadius:12,padding:"14px 16px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}>
+                <span style={{fontWeight:800,fontSize:14,color:GR}}>✅ 최종 제출 · {fmtTime(r.final.time)}</span>
+                <span style={{background:GR,color:"#fff",padding:"3px 12px",borderRadius:20,fontWeight:800}}>{r.final.score} / 100점</span>
+              </div>
+              <MaterialView r={r.final}/>
+              <div style={{marginTop:10}}>
+                {(r.final.scoreDetail||[]).map((s,j)=>(<div key={j} style={{display:"flex",justifyContent:"space-between",gap:10,fontSize:13,padding:"6px 0",borderBottom:"1px solid "+LINE}}>
+                  <span style={{fontWeight:700,color:INK}}>{s.name}</span>
+                  <span style={{color:GR,fontWeight:700,whiteSpace:"nowrap"}}>{s.label} ({s.gained}/{s.weight}점)</span>
+                </div>))}
+              </div>
+              {r.final.overall&&<div style={{marginTop:10,fontSize:13,color:INK,lineHeight:1.6}}><b>총평:</b> {r.final.overall}</div>}
+              {r.final.strengths?.length>0&&<div style={{marginTop:6,fontSize:12.5,color:MUT}}><b style={{color:GRD}}>잘한 점:</b> {r.final.strengths.join(" · ")}</div>}
+              {r.final.improvements?.length>0&&<div style={{marginTop:3,fontSize:12.5,color:MUT}}><b style={{color:GRD}}>보완할 점:</b> {r.final.improvements.join(" · ")}</div>}
+            </div>}
+          </div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+function MaterialView({r}){
+  if(r.kind==="file"&&r.fileUrl)return <a href={r.fileUrl} target="_blank" rel="noreferrer" style={{display:"inline-flex",alignItems:"center",gap:6,background:"#EFF6FF",color:"#1D4ED8",padding:"8px 13px",borderRadius:9,fontSize:13,fontWeight:700,textDecoration:"none"}}>📎 제출 파일 열기 ({r.fileName||"파일"})</a>;
+  if(r.text)return <div style={{background:"#FBFBF8",border:"1px solid "+LINE,borderRadius:9,padding:"10px 13px",fontSize:13,color:INK,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{r.text}</div>;
+  return <div style={{fontSize:12,color:"#94A3B8"}}>자료 없음</div>;
+}
+
+/* ══════════ 학생 페이지 ══════════ */
+function StudentPage({asm}){
+  const ownerUid=asm._ownerUid;
+  const [sid,setSid]=useState(""),[confirmed,setConfirmed]=useState("");
+  const [mode,setMode]=useState("file"),[text,setText]=useState("");
+  const [file,setFile]=useState(null),[fileB,setFileB]=useState(null),[fileName,setFileName]=useState("");
+  const [busy,setBusy]=useState(""),[err,setErr]=useState("");
+  const [fb,setFb]=useState(null),[rounds,setRounds]=useState([]),[checks,setChecks]=useState({});
+  const [submitted,setSubmitted]=useState(false),[finalRes,setFinalRes]=useState(null);
+
+  const start=async()=>{const s=sid.replace(/\s+/g,"");if(!s)return;
+    try{if(firebase.auth&&!firebase.auth().currentUser)await firebase.auth().signInAnonymously();}catch(e){console.error("anon",e);}
+    setConfirmed(s);
+    const rs=await DB.getResults(ownerUid,asm.id);const ex=rs.find(r=>r.studentId===s);
+    if(ex){setRounds(ex.rounds||[]);setSubmitted(ex.submitted||false);setFinalRes(ex.final||null);if((ex.rounds||[]).length)setFb(ex.rounds[ex.rounds.length-1].feedback);}
+  };
+  const pickFile=async(fl)=>{if(!fl)return;const ok=fl.type==="application/pdf"||fl.type.startsWith("image/")||/\.(pdf|png|jpe?g|webp)$/i.test(fl.name);if(!ok){setErr("PDF나 사진만 올릴 수 있어요.");return;}setErr("");setFile(fl);setFileName(fl.name);try{setFileB(await fileB64(fl));}catch{setErr("파일을 읽지 못했어요.");}};
+  const save=async(nextRounds,sub,final)=>{await DB.setResult(ownerUid,asm.id,{studentId:confirmed,rounds:nextRounds,submitted:sub,final:final||null,updatedAt:now()});};
+  const skey=()=>confirmed.replace(/[.#$/[\]\s]/g,"_");
+
+  const getFeedback=async()=>{
+    if(mode==="text"&&!text.trim()){setErr("초안 글을 붙여넣어 주세요.");return;}
+    if(mode==="file"&&(!file||!fileB)){setErr("초안 파일을 올려 주세요.");return;}
+    setErr("");setBusy("fb");
+    try{
+      const n=rounds.length+1;
+      let material;
+      if(mode==="file"){
+        const path=`bwd/${ownerUid}/${asm.id}/${skey()}/${n}_${Date.now()}_${file.name.replace(/[^\w.\-]/g,"_")}`;
+        const url=await uploadToStorage(path,file);
+        material={kind:"file",fileUrl:url,fileName:file.name};
+      }else material={kind:"text",text:text.trim()};
+      const parts=mode==="file"?[filePart(file,fileB)]:[];
+      const d=await aiFeedback(asm,mode==="text"?text.trim():"",parts,rounds.map(r=>r.feedbackSummary||{summary:""}));
+      const summary=(d.criteria||[]).map(c=>{const ci=clamp(c.criterion_index,asm.rubric.length);return asm.rubric[ci].name+":"+(c.improve||"");}).join(" / ");
+      const round={n,...material,feedback:d,feedbackSummary:{summary},time:now()};
+      const nr=[...rounds,round];
+      setRounds(nr);setFb(d);setChecks({});
+      await save(nr,submitted,finalRes);
+    }catch(e){setErr(e.message);}
+    setBusy("");
+  };
+
+  const submitFinal=async()=>{
+    if(!rounds.length){setErr("먼저 초안을 올리고 피드백을 한 번 받아주세요.");return;}
+    if(!confirm("최종 제출하고 자동 채점할까요?"))return;
+    setErr("");setBusy("submit");
+    try{
+      let finalMaterial, parts=[], draftText="";
+      if(mode==="file"&&file&&fileB){
+        const path=`bwd/${ownerUid}/${asm.id}/${skey()}/final_${Date.now()}_${file.name.replace(/[^\w.\-]/g,"_")}`;
+        const url=await uploadToStorage(path,file);
+        finalMaterial={kind:"file",fileUrl:url,fileName:file.name};parts=[filePart(file,fileB)];
+      }else if(mode==="text"&&text.trim()){
+        finalMaterial={kind:"text",text:text.trim()};draftText=text.trim();
+      }else{
+        const last=rounds[rounds.length-1];
+        finalMaterial={kind:last.kind,text:last.text,fileUrl:last.fileUrl,fileName:last.fileName};
+        draftText=last.text||"";
+      }
+      const g=await aiGrade(asm,draftText,parts);
+      const pick={},detail=[];
+      asm.rubric.forEach((c,ci)=>{
+        const sc=(g.scores||[]).find(x=>clamp(x.criterion_index,asm.rubric.length)===ci);
+        const li=sc?clamp(sc.level_index,c.levels.length):Math.floor(c.levels.length/2);
+        pick[ci]=li;
+        const maxP=Math.max(...c.levels.map(l=>l.points));
+        const gained=Math.round((+c.weight||0)*(c.levels[li].points/maxP));
+        detail.push({name:c.name,label:c.levels[li].label,weight:c.weight,gained,feedback:sc?sc.feedback||"":""});
+      });
+      const {score}=scoreFromLevels(asm.rubric,pick);
+      const final={...finalMaterial,score,scoreDetail:detail,overall:g.overall||"",strengths:g.strengths||[],improvements:g.improvements||[],time:now()};
+      setSubmitted(true);setFinalRes(final);
+      await save(rounds,true,final);
+    }catch(e){setErr("채점 중 오류: "+e.message);}
+    setBusy("");
+  };
+
+  if(!confirmed)return(
+    <Center><div style={{background:"#fff",borderRadius:20,padding:32,width:320,boxShadow:"0 16px 48px rgba(16,52,34,.15)",textAlign:"center"}}>
+      <div style={{fontSize:38,marginBottom:8}}>🎯</div>
+      <div style={{fontWeight:800,fontSize:15,color:INK,marginBottom:2}}>{asm.title}</div>
+      {asm.subject&&<div style={{fontSize:12,color:MUT,marginBottom:18}}>📚 {asm.subject}</div>}
+      <label style={{display:"block",textAlign:"left",...lab}}>학년-반-번호</label>
+      <input value={sid} onChange={e=>setSid(e.target.value)} onKeyDown={e=>e.key==="Enter"&&start()} placeholder="예: 3-2-15" autoFocus style={{...inp,fontSize:17,textAlign:"center",fontWeight:700,padding:12}}/>
+      <button onClick={start} style={btn(GR,"#fff",{width:"100%",marginTop:10,padding:12})}>시작하기</button>
+    </div></Center>
+  );
+
+  const sheet=asm.sheet;
+  return(
+    <div style={{minHeight:"100vh",background:PAPER}}>
+      <header style={{background:GR,color:"#fff",padding:"12px 16px"}}>
+        <div style={{maxWidth:720,margin:"0 auto",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div><div style={{fontWeight:900,fontSize:15}}>{asm.title}</div><div style={{fontSize:11,opacity:.8}}>{asm.subject}</div></div>
+          <div style={{fontSize:12,opacity:.85}}>👤 {confirmed} · {rounds.length}차</div>
+        </div>
+      </header>
+      <div style={{maxWidth:720,margin:"0 auto",padding:"18px 16px 60px"}}>
+        {sheet&&<div style={{...card,background:SAGE,border:"none"}}>
+          <div style={{fontWeight:800,fontSize:16,color:GRD,marginBottom:6}}>{sheet.title}</div>
+          <div style={{fontSize:13.5,color:INK,lineHeight:1.7}}>{sheet.scenario}</div>
+          {sheet.steps?.length>0&&<div style={{fontSize:13,color:INK,marginTop:8}}><b>할 일:</b><ol style={{margin:"4px 0 0 18px"}}>{sheet.steps.map((s,i)=><li key={i} style={{marginBottom:2}}>{s}</li>)}</ol></div>}
+        </div>}
+
+        {!submitted&&<div style={card}>
+          <div style={{display:"flex",gap:6,marginBottom:12}}>
+            {[["file","파일 올리기"],["text","글 붙여넣기"]].map(([m,l])=><button key={m} onClick={()=>setMode(m)} style={{padding:"8px 16px",borderRadius:9,border:"1px solid "+SAGEL,background:mode===m?GR:"#fff",color:mode===m?"#fff":MUT,fontWeight:700,fontSize:13,cursor:"pointer"}}>{l}</button>)}
+          </div>
+          {mode==="file"
+            ? <label style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6,border:"2px dashed "+SAGEL,borderRadius:14,padding:"26px 16px",cursor:"pointer",textAlign:"center"}}><input type="file" accept="application/pdf,image/*" hidden onChange={e=>pickFile(e.target.files[0])}/><div style={{fontSize:22}}>⬆</div><div style={{fontWeight:800,fontSize:15}}>내 자료 올리기</div><div style={{fontSize:12,color:MUT}}>PDF 또는 사진</div>{fileName&&<div style={{fontSize:13,fontWeight:700,color:GR}}>선택됨: {fileName}</div>}</label>
+            : <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="여기에 내 글을 붙여넣으세요." style={{...inp,height:150,resize:"vertical"}}/>}
+          <Err msg={err}/>
+          <button onClick={getFeedback} disabled={busy} style={btn(GR,"#fff",{width:"100%",marginTop:12,padding:13,fontSize:15})}>{busy==="fb"?<Loading label="자료를 읽는 중…"/>:(rounds.length>0?"고쳐서 다시 피드백 받기":"피드백 받기")}</button>
+        </div>}
+
+        {fb&&!submitted&&<div>
+          <div style={{background:GR,color:"#fff",borderRadius:16,padding:"18px 22px",fontSize:15,fontWeight:700,lineHeight:1.6,marginBottom:8}}>{fb.encouragement}</div>
+          {fb.progress_note&&<div style={{background:"#EAF6EF",border:"1px solid #BFE3CD",color:GRD,borderRadius:11,padding:"11px 15px",fontSize:13.5,fontWeight:600,marginBottom:10}}>📈 {fb.progress_note}</div>}
+          {(fb.criteria||[]).map((c,idx)=>{const ci=clamp(c.criterion_index,asm.rubric.length);const crit=asm.rubric[ci];const li=clamp(c.level_index,crit.levels.length);const cur=crit.levels[li];const target=li>0?crit.levels[li-1]:null;const r=li/Math.max(1,crit.levels.length-1);const chip=r<=.34?["#DBF0E3","#25824F"]:(r<=.67?["#FBF3D3","#9A7B18"]:["#F6E6E3","#B4534A"]);
+            return <div key={idx} style={{...card,marginBottom:12}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,flexWrap:"wrap"}}><span style={{fontWeight:800,fontSize:15}}>{crit.name}</span><span style={{fontSize:11.5,fontWeight:800,padding:"3px 11px",borderRadius:20,background:chip[0],color:chip[1]}}>지금: {cur.label}</span></div>
+              <div style={{fontSize:14,lineHeight:1.6,margin:"6px 0"}}>👍 {c.strength}</div>
+              <div style={{fontSize:14,lineHeight:1.6,margin:"6px 0"}}>✏️ {c.improve}</div>
+              {target?<div style={{fontSize:14,lineHeight:1.6,margin:"6px 0",color:GRD}}>🎯 <b>다음 목표</b> — {target.descriptor}</div>:<div style={{fontSize:14,color:GRD,margin:"6px 0"}}>🎯 <b>훌륭해!</b> 최고 수준이야.</div>}
+            </div>;})}
+          <div style={card}><div style={{fontWeight:800,color:GR,marginBottom:8}}>다음에 이렇게 고쳐보자</div>{(fb.next_steps||[]).map((s,i)=>(<div key={i} onClick={()=>setChecks(c=>({...c,[i]:!c[i]}))} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"9px 12px",border:"1px solid "+SAGEL,borderRadius:10,marginBottom:8,cursor:"pointer",background:checks[i]?"#F1F5F1":"#FbFdFb",opacity:checks[i]?.6:1,textDecoration:checks[i]?"line-through":"none"}}><span style={{width:20,height:20,flex:"none",border:"2px solid "+GR,borderRadius:6,display:"flex",alignItems:"center",justifyContent:"center",background:checks[i]?GR:"transparent",color:"#fff",fontSize:13}}>{checks[i]?"✓":""}</span><span style={{fontSize:14,lineHeight:1.5}}>{s}</span></div>))}</div>
+          <button onClick={submitFinal} disabled={busy} style={btn("#059669","#fff",{width:"100%",padding:13,fontSize:15,marginTop:4})}>{busy==="submit"?<Loading label="최종 채점 중…"/>:"✅ 최종 제출 (자동 채점)"}</button>
+        </div>}
+
+        {submitted&&finalRes&&<div>
+          <div style={{background:GR,color:"#fff",borderRadius:16,padding:"22px 24px",textAlign:"center",marginBottom:12}}>
+            <div style={{fontSize:14,opacity:.85,marginBottom:4}}>최종 제출 완료 · 자동 채점 결과</div>
+            <div style={{fontSize:40,fontWeight:900}}>{finalRes.score}<span style={{fontSize:20,opacity:.8}}> / 100점</span></div>
+          </div>
+          {(finalRes.scoreDetail||[]).map((s,i)=>(<div key={i} style={{...card,marginBottom:10,padding:"13px 16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",gap:10,alignItems:"center",marginBottom:s.feedback?5:0}}><span style={{fontWeight:800,fontSize:14}}>{s.name}</span><span style={{color:GR,fontWeight:800,whiteSpace:"nowrap"}}>{s.label} · {s.gained}/{s.weight}점</span></div>
+            {s.feedback&&<div style={{fontSize:13,color:MUT,lineHeight:1.55}}>{s.feedback}</div>}
+          </div>))}
+          {finalRes.overall&&<div style={{...card}}><div style={{fontWeight:800,color:GR,marginBottom:6}}>총평</div><div style={{fontSize:14,lineHeight:1.65,color:INK}}>{finalRes.overall}</div></div>}
+          <div style={{background:"#DCFCE7",borderRadius:12,padding:14,textAlign:"center",color:"#166534",fontWeight:700,fontSize:13}}>제출과 채점이 완료되었어요. 선생님이 전체 과정을 확인합니다.</div>
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
